@@ -9,6 +9,7 @@ const GAME_DURATION_MS = 30_000
 const CORRECT_FEEDBACK_MS = 700
 const WRONG_FEEDBACK_MS = 550
 const SAME_QR_GUARD_MS = 1_200
+const URGENT_TIME_MS = 5_000
 
 type GamePhase =
   | 'start'
@@ -16,6 +17,47 @@ type GamePhase =
   | 'countdown'
   | 'playing'
   | 'finished'
+
+type SoundEffect = 'correct' | 'wrong' | 'start' | 'finish'
+
+type SoundPattern = {
+  frequencies: number[]
+  interval: number
+  duration: number
+  volume: number
+  wave: OscillatorType
+}
+
+const soundPatterns: Record<SoundEffect, SoundPattern> = {
+  correct: {
+    frequencies: [660, 880],
+    interval: 0.09,
+    duration: 0.12,
+    volume: 0.12,
+    wave: 'sine',
+  },
+  wrong: {
+    frequencies: [240, 180],
+    interval: 0.1,
+    duration: 0.13,
+    volume: 0.1,
+    wave: 'triangle',
+  },
+  start: {
+    frequencies: [523, 659, 784],
+    interval: 0.08,
+    duration: 0.1,
+    volume: 0.09,
+    wave: 'sine',
+  },
+  finish: {
+    frequencies: [784, 659, 523],
+    interval: 0.11,
+    duration: 0.15,
+    volume: 0.1,
+    wave: 'sine',
+  },
+}
 
 const appElement = document.querySelector<HTMLDivElement>('#app')
 
@@ -151,46 +193,76 @@ function stopSession() {
 
 function prepareAudio() {
   if (!audioContext) {
-    audioContext = new AudioContext()
+    const AudioContextConstructor =
+      window.AudioContext ??
+      (
+        window as typeof window & {
+          webkitAudioContext?: typeof AudioContext
+        }
+      ).webkitAudioContext
+
+    if (!AudioContextConstructor) {
+      return
+    }
+
+    audioContext = new AudioContextConstructor()
   }
 
   if (audioContext.state === 'suspended') {
     void audioContext.resume()
   }
+
+  // iPad Safariで後から鳴らせるよう、開始ボタンの操作中に音声を解放します。
+  const unlockOscillator = audioContext.createOscillator()
+  const unlockGain = audioContext.createGain()
+  const unlockAt = audioContext.currentTime
+
+  unlockGain.gain.setValueAtTime(0.0001, unlockAt)
+  unlockOscillator.connect(unlockGain)
+  unlockGain.connect(audioContext.destination)
+  unlockOscillator.start(unlockAt)
+  unlockOscillator.stop(unlockAt + 0.01)
 }
 
-function playFeedbackSound(result: 'correct' | 'wrong') {
+function playSound(effect: SoundEffect) {
   if (!audioContext) {
     return
   }
 
-  void audioContext.resume()
+  const context = audioContext
+  const pattern = soundPatterns[effect]
 
-  const startAt = audioContext.currentTime
-  const frequencies = result === 'correct' ? [660, 880] : [240, 180]
+  function scheduleNotes() {
+    const startAt = context.currentTime
 
-  frequencies.forEach((frequency, index) => {
-    const oscillator = audioContext?.createOscillator()
-    const gain = audioContext?.createGain()
+    pattern.frequencies.forEach((frequency, index) => {
+      const oscillator = context.createOscillator()
+      const gain = context.createGain()
+      const noteStartsAt = startAt + index * pattern.interval
+      const noteEndsAt = noteStartsAt + pattern.duration
 
-    if (!audioContext || !oscillator || !gain) {
-      return
-    }
+      oscillator.type = pattern.wave
+      oscillator.frequency.setValueAtTime(frequency, noteStartsAt)
+      gain.gain.setValueAtTime(0.0001, noteStartsAt)
+      gain.gain.exponentialRampToValueAtTime(
+        pattern.volume,
+        noteStartsAt + 0.015,
+      )
+      gain.gain.exponentialRampToValueAtTime(0.0001, noteEndsAt)
 
-    const noteStartsAt = startAt + index * 0.09
-    const noteEndsAt = noteStartsAt + 0.12
+      oscillator.connect(gain)
+      gain.connect(context.destination)
+      oscillator.start(noteStartsAt)
+      oscillator.stop(noteEndsAt)
+    })
+  }
 
-    oscillator.type = result === 'correct' ? 'sine' : 'triangle'
-    oscillator.frequency.setValueAtTime(frequency, noteStartsAt)
-    gain.gain.setValueAtTime(0.0001, noteStartsAt)
-    gain.gain.exponentialRampToValueAtTime(0.12, noteStartsAt + 0.015)
-    gain.gain.exponentialRampToValueAtTime(0.0001, noteEndsAt)
+  if (context.state === 'suspended') {
+    void context.resume().then(scheduleNotes)
+    return
+  }
 
-    oscillator.connect(gain)
-    gain.connect(audioContext.destination)
-    oscillator.start(noteStartsAt)
-    oscillator.stop(noteEndsAt)
-  })
+  scheduleNotes()
 }
 
 function resetGameState() {
@@ -211,6 +283,7 @@ function showStartScreen() {
   app.innerHTML = `
     <main class="app-shell start-view">
       <section class="start-card" aria-labelledby="game-title">
+        <p class="version-label">REGISTER GAME <span>V2</span></p>
         <p class="eyebrow"><span aria-hidden="true"></span> READY?</p>
 
         <div class="start-icon" aria-hidden="true">🛒</div>
@@ -247,7 +320,7 @@ function renderGameScreen() {
             <strong id="timer-display">30.0</strong>
           </div>
 
-          <div class="metric">
+          <div id="score-metric" class="metric">
             <span>SCORE</span>
             <strong id="score-display">0</strong>
           </div>
@@ -277,6 +350,11 @@ function renderGameScreen() {
                 muted
                 playsinline
               ></video>
+
+              <div class="camera-label" aria-hidden="true">
+                <span></span>
+                FRONT CAMERA
+              </div>
 
               <div class="scan-guide" aria-hidden="true">
                 <span></span>
@@ -365,6 +443,7 @@ function startTimedGame(currentSession: number) {
   phase = 'playing'
   gameEndsAt = performance.now() + GAME_DURATION_MS
 
+  playSound('start')
   updateProductDisplay()
   showWaitingMessage()
   updateTimer(currentSession)
@@ -380,7 +459,7 @@ function updateTimer(currentSession: number) {
   const timeMetric = getElement<HTMLDivElement>('#time-metric')
 
   timerDisplay.textContent = (remainingMs / 1000).toFixed(1)
-  timeMetric.classList.toggle('is-urgent', remainingMs <= 10_000)
+  timeMetric.classList.toggle('is-urgent', remainingMs <= URGENT_TIME_MS)
 
   if (remainingMs <= 0) {
     showResultScreen()
@@ -395,11 +474,16 @@ function updateTimer(currentSession: number) {
 function showCorrectFeedback() {
   const scanStatus = getElement<HTMLParagraphElement>('#scan-status')
   const gameCard = getElement<HTMLElement>('#game-card')
+  const scoreDisplay = getElement<HTMLElement>('#score-display')
+  const scoreMetric = getElement<HTMLElement>('#score-metric')
 
   score += 1
   isScanLocked = true
 
-  getElement<HTMLElement>('#score-display').textContent = String(score)
+  scoreDisplay.textContent = String(score)
+  scoreMetric.classList.remove('score-pop')
+  void scoreMetric.offsetWidth
+  scoreMetric.classList.add('score-pop')
   scanStatus.classList.remove('is-wrong')
   scanStatus.classList.add('is-correct')
   scanStatus.textContent = '○ 正解！ ＋1点'
@@ -407,7 +491,7 @@ function showCorrectFeedback() {
   gameCard.classList.remove('feedback-wrong', 'feedback-correct')
   void gameCard.offsetWidth
   gameCard.classList.add('feedback-correct')
-  playFeedbackSound('correct')
+  playSound('correct')
 
   feedbackTimer = window.setTimeout(() => {
     feedbackTimer = null
@@ -436,7 +520,7 @@ function showWrongFeedback() {
   gameCard.classList.remove('feedback-correct', 'feedback-wrong')
   void gameCard.offsetWidth
   gameCard.classList.add('feedback-wrong')
-  playFeedbackSound('wrong')
+  playSound('wrong')
 
   feedbackTimer = window.setTimeout(() => {
     feedbackTimer = null
@@ -503,7 +587,7 @@ async function startGamePreparation() {
       {
         audio: false,
         video: {
-          facingMode: { ideal: 'environment' },
+          facingMode: 'user',
           width: { ideal: 1280 },
           height: { ideal: 720 },
         },
@@ -552,6 +636,14 @@ function showResultScreen() {
 
   phase = 'finished'
   stopSession()
+  playSound('finish')
+
+  const resultComment =
+    score >= 10
+      ? 'すばらしいスピード！'
+      : score >= 5
+        ? 'いいペースでした！'
+        : 'もう一度チャレンジ！'
 
   app.innerHTML = `
     <main class="app-shell result-view">
@@ -563,6 +655,8 @@ function showResultScreen() {
         <h1 id="result-title" class="result-score">${score}点！</h1>
 
         <p class="result-message">30秒で${score}商品クリア</p>
+
+        <p class="result-comment">${resultComment}</p>
 
         <button id="retry-button" class="primary-button" type="button">
           もう一度遊ぶ
