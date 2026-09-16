@@ -3,6 +3,7 @@ export type ProductCategory =
   | 'onigiri'
   | 'bread'
   | 'ramen'
+  | 'bento'
 
 export type Product = {
   id: string
@@ -23,32 +24,11 @@ export const products: Product[] = [
     emoji: '🍈',
   },
   {
-    id: 'koppe-bread',
-    name: 'コッペパン',
-    qrValue: 'REGAME:v2:koppe-bread',
-    category: 'bread',
-    emoji: '🥖',
-  },
-  {
-    id: 'wiener-bread',
-    name: 'ウィンナーパン',
-    qrValue: 'REGAME:v2:wiener-bread',
-    category: 'bread',
-    emoji: '🌭',
-  },
-  {
     id: 'twist-bread',
     name: 'ツイストパン',
     qrValue: 'REGAME:v2:twist-bread',
     category: 'bread',
     emoji: '🥨',
-  },
-  {
-    id: 'croissant',
-    name: 'クロワッサン',
-    qrValue: 'REGAME:v2:croissant',
-    category: 'bread',
-    emoji: '🥐',
   },
   {
     id: 'donut',
@@ -65,16 +45,23 @@ export const products: Product[] = [
     emoji: '🍩',
   },
   {
+    id: 'croissant',
+    name: 'クロワッサン',
+    qrValue: 'REGAME:v2:croissant',
+    category: 'bread',
+    emoji: '🥐',
+  },
+  {
     id: 'yakisoba-bread',
-    name: 'やきそばパン',
+    name: '焼きそばパン',
     qrValue: 'REGAME:v2:yakisoba-bread',
     category: 'bread',
     emoji: '🥖',
   },
   {
-    id: 'shoyu-ramen',
-    name: '醤油ラーメン',
-    qrValue: 'REGAME:v2:shoyu-ramen',
+    id: 'tantanmen',
+    name: '担々麺',
+    qrValue: 'REGAME:v2:tantanmen',
     category: 'ramen',
     emoji: '🍜',
   },
@@ -86,18 +73,11 @@ export const products: Product[] = [
     emoji: '🍜',
   },
   {
-    id: 'miso-ramen',
-    name: '味噌ラーメン',
-    qrValue: 'REGAME:v2:miso-ramen',
-    category: 'ramen',
-    emoji: '🍜',
-  },
-  {
-    id: 'tonkotsu-ramen',
-    name: '豚骨ラーメン',
-    qrValue: 'REGAME:v2:tonkotsu-ramen',
-    category: 'ramen',
-    emoji: '🍜',
+    id: 'okaka-onigiri',
+    name: 'おかかおにぎり',
+    qrValue: 'REGAME:v2:okaka-onigiri',
+    category: 'onigiri',
+    emoji: '🍙',
   },
   {
     id: 'salmon-onigiri',
@@ -108,7 +88,7 @@ export const products: Product[] = [
   },
   {
     id: 'ume-onigiri',
-    name: '梅おにぎり',
+    name: '梅干しおにぎり',
     qrValue: 'REGAME:v2:ume-onigiri',
     category: 'onigiri',
     emoji: '🍙',
@@ -126,6 +106,13 @@ export const products: Product[] = [
     qrValue: 'REGAME:v2:kombu-onigiri',
     category: 'onigiri',
     emoji: '🍙',
+  },
+  {
+    id: 'bento',
+    name: 'お弁当',
+    qrValue: 'REGAME:v2:bento',
+    category: 'bento',
+    emoji: '🍱',
   },
   {
     id: 'aa-lemon',
@@ -150,7 +137,7 @@ export const products: Product[] = [
   },
   {
     id: 'kami-cola',
-    name: 'カミコーラー',
+    name: 'カココーラー',
     qrValue: 'REGAME:v2:kami-cola',
     category: 'drink',
     emoji: '🥤',

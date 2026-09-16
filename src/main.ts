@@ -70,10 +70,12 @@ const qrReader = new BrowserQRCodeReader()
 
 let phase: GamePhase = 'start'
 let scannerControls: IScannerControls | null = null
+let cameraStream: MediaStream | null = null
 let scannerSession = 0
 let feedbackTimer: number | null = null
 let countdownTimer: number | null = null
 let timerFrame: number | null = null
+let deadlineTimer: number | null = null
 let audioContext: AudioContext | null = null
 
 let gameEndsAt = 0
@@ -157,6 +159,8 @@ function drawNextProduct() {
 }
 
 function stopCameraTracks() {
+  cameraStream?.getTracks().forEach((track) => track.stop())
+  cameraStream = null
   const video = document.querySelector<HTMLVideoElement>('#camera-preview')
   const stream = video?.srcObject
 
@@ -188,40 +192,54 @@ function stopSession() {
     timerFrame = null
   }
 
+  if (deadlineTimer !== null) {
+    window.clearTimeout(deadlineTimer)
+    deadlineTimer = null
+  }
+
   isScanLocked = false
 }
 
 function prepareAudio() {
-  if (!audioContext) {
-    const AudioContextConstructor =
-      window.AudioContext ??
-      (
-        window as typeof window & {
-          webkitAudioContext?: typeof AudioContext
-        }
-      ).webkitAudioContext
+  // 音声が利用できなくてもカメラとゲームは続けられるようにします。
+  try {
+    if (!audioContext) {
+      const AudioContextConstructor =
+        window.AudioContext ??
+        (
+          window as typeof window & {
+            webkitAudioContext?: typeof AudioContext
+          }
+        ).webkitAudioContext
 
-    if (!AudioContextConstructor) {
-      return
+      if (!AudioContextConstructor) {
+        return
+      }
+
+      audioContext = new AudioContextConstructor()
     }
 
-    audioContext = new AudioContextConstructor()
+    if (audioContext.state === 'suspended') {
+      void audioContext.resume().catch(() => {})
+    }
+
+    // iPad Safariで後から鳴らせるよう、開始ボタンの操作中に音声を解放します。
+    const unlockOscillator = audioContext.createOscillator()
+    const unlockGain = audioContext.createGain()
+    const unlockAt = audioContext.currentTime
+
+    unlockGain.gain.setValueAtTime(0.0001, unlockAt)
+    unlockOscillator.connect(unlockGain)
+    unlockGain.connect(audioContext.destination)
+    unlockOscillator.start(unlockAt)
+    unlockOscillator.stop(unlockAt + 0.01)
+    unlockOscillator.onended = () => {
+      unlockOscillator.disconnect()
+      unlockGain.disconnect()
+    }
+  } catch {
+    audioContext = null
   }
-
-  if (audioContext.state === 'suspended') {
-    void audioContext.resume()
-  }
-
-  // iPad Safariで後から鳴らせるよう、開始ボタンの操作中に音声を解放します。
-  const unlockOscillator = audioContext.createOscillator()
-  const unlockGain = audioContext.createGain()
-  const unlockAt = audioContext.currentTime
-
-  unlockGain.gain.setValueAtTime(0.0001, unlockAt)
-  unlockOscillator.connect(unlockGain)
-  unlockGain.connect(audioContext.destination)
-  unlockOscillator.start(unlockAt)
-  unlockOscillator.stop(unlockAt + 0.01)
 }
 
 function playSound(effect: SoundEffect) {
@@ -254,11 +272,20 @@ function playSound(effect: SoundEffect) {
       gain.connect(context.destination)
       oscillator.start(noteStartsAt)
       oscillator.stop(noteEndsAt)
+      oscillator.onended = () => {
+        oscillator.disconnect()
+        gain.disconnect()
+      }
     })
   }
 
-  if (context.state === 'suspended') {
-    void context.resume().then(scheduleNotes)
+  if (context.state !== 'running') {
+    const soundSession = scannerSession
+    void context.resume()
+      .then(() => {
+        if (soundSession === scannerSession) scheduleNotes()
+      })
+      .catch(() => {})
     return
   }
 
@@ -442,6 +469,9 @@ function startTimedGame(currentSession: number) {
 
   phase = 'playing'
   gameEndsAt = performance.now() + GAME_DURATION_MS
+  deadlineTimer = window.setTimeout(() => {
+    if (currentSession === scannerSession) showResultScreen()
+  }, GAME_DURATION_MS)
 
   playSound('start')
   updateProductDisplay()
@@ -500,6 +530,11 @@ function showCorrectFeedback() {
       return
     }
 
+    if (performance.now() >= gameEndsAt) {
+      showResultScreen()
+      return
+    }
+
     drawNextProduct()
     updateProductDisplay()
     showWaitingMessage()
@@ -537,13 +572,20 @@ function showWrongFeedback() {
 function handleQrResult(scannedValue: string, currentSession: number) {
   if (
     currentSession !== scannerSession ||
-    phase !== 'playing' ||
-    isScanLocked
+    phase !== 'playing'
   ) {
     return
   }
 
   const processedAt = performance.now()
+
+  // 描画更新より先に読取結果が届いても、30秒以降は加点しません。
+  if (processedAt >= gameEndsAt) {
+    showResultScreen()
+    return
+  }
+
+  if (isScanLocked) return
 
   if (
     scannedValue === lastProcessedQrValue &&
@@ -581,17 +623,27 @@ async function startGamePreparation() {
   const scanStatus = getElement<HTMLParagraphElement>('#scan-status')
   const countdownText = getElement<HTMLElement>('#countdown-text')
   const countdownNote = getElement<HTMLElement>('#countdown-note')
+  let preparingStream: MediaStream | null = null
 
   try {
-    const controls = await qrReader.decodeFromConstraints(
-      {
-        audio: false,
-        video: {
-          facingMode: 'user',
-          width: { ideal: 1280 },
-          height: { ideal: 720 },
-        },
+    preparingStream = await navigator.mediaDevices.getUserMedia({
+      audio: false,
+      video: {
+        facingMode: 'user',
+        width: { ideal: 1280 },
+        height: { ideal: 720 },
       },
+    })
+
+    // 許可を待つ間に戻った場合、届いた映像をすぐ停止します。
+    if (currentSession !== scannerSession) {
+      preparingStream.getTracks().forEach((track) => track.stop())
+      return
+    }
+
+    cameraStream = preparingStream
+    const controls = await qrReader.decodeFromStream(
+      preparingStream,
       video,
       (result) => {
         if (result) {
@@ -615,11 +667,13 @@ async function startGamePreparation() {
       runCountdown(currentSession)
     }, 350)
   } catch (error) {
+    preparingStream?.getTracks().forEach((track) => track.stop())
     if (currentSession !== scannerSession) {
       return
     }
 
     console.error(error)
+    stopSession()
     phase = 'preparing'
     scanStatus.classList.add('is-wrong')
     scanStatus.textContent = 'カメラを開始できませんでした'
@@ -673,5 +727,12 @@ function showResultScreen() {
 }
 
 window.addEventListener('beforeunload', stopSession)
+window.addEventListener('pagehide', showStartScreen)
+document.addEventListener('visibilitychange', () => {
+  // 別アプリやタブに移ったら中断し、見えない状態でカメラを使いません。
+  if (document.hidden && phase !== 'start' && phase !== 'finished') {
+    showStartScreen()
+  }
+})
 
 showStartScreen()
