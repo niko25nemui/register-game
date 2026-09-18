@@ -5,7 +5,8 @@ import {
 } from '@zxing/browser'
 import { products, type Product } from './products'
 
-const GAME_DURATION_MS = 30_000
+const GAME_DURATION_SECONDS = 45
+const GAME_DURATION_MS = GAME_DURATION_SECONDS * 1_000
 const CORRECT_FEEDBACK_MS = 700
 const WRONG_FEEDBACK_MS = 550
 const SAME_QR_GUARD_MS = 1_200
@@ -18,7 +19,7 @@ type GamePhase =
   | 'playing'
   | 'finished'
 
-type SoundEffect = 'correct' | 'wrong' | 'start' | 'finish'
+type SoundEffect = 'correct' | 'wrong' | 'start' | 'finish' | 'countdown' | 'timeWarning'
 
 type SoundPattern = {
   frequencies: number[]
@@ -33,28 +34,42 @@ const soundPatterns: Record<SoundEffect, SoundPattern> = {
     frequencies: [660, 880],
     interval: 0.09,
     duration: 0.12,
-    volume: 0.12,
+    volume: 0.24,
     wave: 'sine',
   },
   wrong: {
     frequencies: [240, 180],
     interval: 0.1,
     duration: 0.13,
-    volume: 0.1,
+    volume: 0.2,
     wave: 'triangle',
   },
   start: {
     frequencies: [523, 659, 784],
     interval: 0.08,
     duration: 0.1,
-    volume: 0.09,
+    volume: 0.18,
     wave: 'sine',
   },
   finish: {
     frequencies: [784, 659, 523],
     interval: 0.11,
     duration: 0.15,
-    volume: 0.1,
+    volume: 0.2,
+    wave: 'sine',
+  },
+  countdown: {
+    frequencies: [600],
+    interval: 0,
+    duration: 0.1,
+    volume: 0.16,
+    wave: 'sine',
+  },
+  timeWarning: {
+    frequencies: [1000],
+    interval: 0,
+    duration: 0.08,
+    volume: 0.12,
     wave: 'sine',
   },
 }
@@ -77,6 +92,9 @@ let countdownTimer: number | null = null
 let timerFrame: number | null = null
 let deadlineTimer: number | null = null
 let audioContext: AudioContext | null = null
+const activeOscillators = new Set<OscillatorNode>()
+let soundRequest = 0
+let lastWarningSecond: number | null = null
 
 let gameEndsAt = 0
 let score = 0
@@ -172,6 +190,7 @@ function stopCameraTracks() {
 
 function stopSession() {
   scannerSession += 1
+  stopSounds()
 
   scannerControls?.stop()
   scannerControls = null
@@ -200,10 +219,23 @@ function stopSession() {
   isScanLocked = false
 }
 
+function stopSounds() {
+  // 戻る・終了時の音と、再開待ちの古い音を残さないようにします。
+  soundRequest += 1
+  activeOscillators.forEach((oscillator) => {
+    try {
+      oscillator.stop()
+    } catch {
+      // すでに停止した音は無視します。
+    }
+  })
+  activeOscillators.clear()
+}
+
 function prepareAudio() {
   // 音声が利用できなくてもカメラとゲームは続けられるようにします。
   try {
-    if (!audioContext) {
+    if (!audioContext || audioContext.state === 'closed') {
       const AudioContextConstructor =
         window.AudioContext ??
         (
@@ -219,7 +251,7 @@ function prepareAudio() {
       audioContext = new AudioContextConstructor()
     }
 
-    if (audioContext.state === 'suspended') {
+    if (audioContext.state !== 'running') {
       void audioContext.resume().catch(() => {})
     }
 
@@ -231,26 +263,42 @@ function prepareAudio() {
     unlockGain.gain.setValueAtTime(0.0001, unlockAt)
     unlockOscillator.connect(unlockGain)
     unlockGain.connect(audioContext.destination)
-    unlockOscillator.start(unlockAt)
-    unlockOscillator.stop(unlockAt + 0.01)
+    activeOscillators.add(unlockOscillator)
     unlockOscillator.onended = () => {
+      activeOscillators.delete(unlockOscillator)
       unlockOscillator.disconnect()
       unlockGain.disconnect()
     }
+    unlockOscillator.start(unlockAt)
+    unlockOscillator.stop(unlockAt + 0.01)
   } catch {
+    stopSounds()
     audioContext = null
   }
 }
 
 function playSound(effect: SoundEffect) {
-  if (!audioContext) {
+  if (!audioContext || document.hidden) {
     return
   }
 
+  stopSounds()
   const context = audioContext
   const pattern = soundPatterns[effect]
+  const currentSoundRequest = soundRequest
+  const soundSession = scannerSession
+  const requestedAt = performance.now()
 
   function scheduleNotes() {
+    // 音声許可の再開が遅れた場合、古い合図をまとめて鳴らしません。
+    if (
+      currentSoundRequest !== soundRequest ||
+      soundSession !== scannerSession ||
+      document.hidden ||
+      context.state !== 'running' ||
+      performance.now() - requestedAt > 400
+    ) return
+
     const startAt = context.currentTime
 
     pattern.frequencies.forEach((frequency, index) => {
@@ -270,26 +318,30 @@ function playSound(effect: SoundEffect) {
 
       oscillator.connect(gain)
       gain.connect(context.destination)
-      oscillator.start(noteStartsAt)
-      oscillator.stop(noteEndsAt)
+      activeOscillators.add(oscillator)
       oscillator.onended = () => {
+        activeOscillators.delete(oscillator)
         oscillator.disconnect()
         gain.disconnect()
       }
+      oscillator.start(noteStartsAt)
+      oscillator.stop(noteEndsAt)
     })
   }
 
-  if (context.state !== 'running') {
-    const soundSession = scannerSession
-    void context.resume()
-      .then(() => {
-        if (soundSession === scannerSession) scheduleNotes()
+  try {
+    if (context.state !== 'running') {
+      void context.resume().then(scheduleNotes).catch(() => {
+        if (currentSoundRequest === soundRequest) stopSounds()
       })
-      .catch(() => {})
-    return
-  }
+      return
+    }
 
-  scheduleNotes()
+    scheduleNotes()
+  } catch {
+    // 再生機器の切り替え等で音が失敗しても、得点・タイマーは止めません。
+    stopSounds()
+  }
 }
 
 function resetGameState() {
@@ -300,6 +352,7 @@ function resetGameState() {
   isScanLocked = false
   lastProcessedQrValue = null
   lastProcessedAt = 0
+  lastWarningSecond = null
   drawNextProduct()
 }
 
@@ -318,7 +371,7 @@ function showStartScreen() {
         <h1 id="game-title">レジチャレンジ</h1>
 
         <p class="start-message">
-          30秒で商品をいくつ見つけられるかな？
+          ${GAME_DURATION_SECONDS}秒で商品をいくつ見つけられるかな？
         </p>
 
         <button id="start-button" class="primary-button" type="button">
@@ -327,6 +380,10 @@ function showStartScreen() {
         </button>
 
         <p class="start-note">カメラを使って商品のQRコードを読み取ります</p>
+        <div class="sound-guide">
+          <p id="sound-note" aria-live="polite">音を使います。マナーモード（消音）を解除し、音量を確認してください。</p>
+          <button id="sound-check-button" class="text-button" type="button" aria-describedby="sound-note">音を確認</button>
+        </div>
       </section>
     </main>
   `
@@ -335,6 +392,12 @@ function showStartScreen() {
     'click',
     startGamePreparation,
   )
+  getElement<HTMLButtonElement>('#sound-check-button').addEventListener('click', () => {
+    prepareAudio()
+    playSound('correct')
+    getElement<HTMLParagraphElement>('#sound-note').textContent =
+      '聞こえましたか？ 聞こえない場合は、消音・本体音量・Bluetoothの接続先を確認してください。'
+  })
 }
 
 function renderGameScreen() {
@@ -344,7 +407,7 @@ function renderGameScreen() {
         <header class="game-hud">
           <div id="time-metric" class="metric">
             <span>TIME</span>
-            <strong id="timer-display">30.0</strong>
+            <strong id="timer-display">${GAME_DURATION_SECONDS.toFixed(1)}</strong>
           </div>
 
           <div id="score-metric" class="metric">
@@ -448,6 +511,7 @@ function runCountdown(currentSession: number) {
     }
 
     countdownText.textContent = text
+    if (text !== 'START!') playSound('countdown')
     overlay.classList.remove('countdown-pop')
     void overlay.offsetWidth
     overlay.classList.add('countdown-pop')
@@ -488,12 +552,20 @@ function updateTimer(currentSession: number) {
   const timerDisplay = getElement<HTMLElement>('#timer-display')
   const timeMetric = getElement<HTMLDivElement>('#time-metric')
 
-  timerDisplay.textContent = (remainingMs / 1000).toFixed(1)
+  // 終了直前に四捨五入で「0.0」と表示されることを防ぎます。
+  timerDisplay.textContent = (Math.ceil(remainingMs / 100) / 10).toFixed(1)
   timeMetric.classList.toggle('is-urgent', remainingMs <= URGENT_TIME_MS)
 
   if (remainingMs <= 0) {
     showResultScreen()
     return
+  }
+
+  const remainingSeconds = Math.ceil(remainingMs / 1000)
+  if (remainingMs <= URGENT_TIME_MS && remainingSeconds !== lastWarningSecond) {
+    lastWarningSecond = remainingSeconds
+    // 正誤の音を優先し、同じ秒に何度も警告音を鳴らしません。
+    if (!isScanLocked) playSound('timeWarning')
   }
 
   timerFrame = window.requestAnimationFrame(() => {
@@ -579,7 +651,7 @@ function handleQrResult(scannedValue: string, currentSession: number) {
 
   const processedAt = performance.now()
 
-  // 描画更新より先に読取結果が届いても、30秒以降は加点しません。
+  // 描画更新より先に読取結果が届いても、制限時間以降は加点しません。
   if (processedAt >= gameEndsAt) {
     showResultScreen()
     return
@@ -708,7 +780,7 @@ function showResultScreen() {
 
         <h1 id="result-title" class="result-score">${score}点！</h1>
 
-        <p class="result-message">30秒で${score}商品クリア</p>
+        <p class="result-message">${GAME_DURATION_SECONDS}秒で${score}商品クリア</p>
 
         <p class="result-comment">${resultComment}</p>
 
@@ -730,7 +802,9 @@ window.addEventListener('beforeunload', stopSession)
 window.addEventListener('pagehide', showStartScreen)
 document.addEventListener('visibilitychange', () => {
   // 別アプリやタブに移ったら中断し、見えない状態でカメラを使いません。
-  if (document.hidden && phase !== 'start' && phase !== 'finished') {
+  if (!document.hidden) return
+  stopSounds()
+  if (phase !== 'start' && phase !== 'finished') {
     showStartScreen()
   }
 })
